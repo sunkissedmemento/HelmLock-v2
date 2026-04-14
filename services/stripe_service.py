@@ -11,10 +11,10 @@ def is_stripe_configured() -> bool:
     return bool(os.environ.get("STRIPE_SECRET_KEY", ""))
 
 
-def create_rental_session(locker_number: int) -> str:
+def create_rental_session(locker_number: int):
     """
     Creates a Stripe Checkout session for a 1-hour rental.
-    Returns the redirect URL.
+    Returns (url, session_id).
     Raises Exception on Stripe error.
     """
     session = stripe.checkout.Session.create(
@@ -38,7 +38,8 @@ def create_rental_session(locker_number: int) -> str:
         cancel_url=f"{BASE_URL}/payment-cancelled",
         metadata={"locker_number": str(locker_number)},
     )
-    return session.url
+    print(f"[Stripe] Session created: id={session.id} url={session.url}")
+    return session.url, session.id
 
 
 def create_overtime_session(locker_number: int, pin: str, hours: int, amount: int) -> str:
