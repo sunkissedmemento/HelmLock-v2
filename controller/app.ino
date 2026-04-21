@@ -1,204 +1,184 @@
 #include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_PN532.h>
 
-// =========================================================
-// CONFIG
-// =========================================================
-#define BAUD_RATE 115200
-#define MAX_LOCKERS 6
+// ================= NFC =================
+Adafruit_PN532 nfc(-1);
 
-// ---- Pins (EDIT THESE BASED ON YOUR WIRING) ----
-int LOCK_PINS[MAX_LOCKERS]   = {22, 23, 24, 25, 26, 27};
-int REED_PINS[MAX_LOCKERS]   = {30, 31, 32, 33, 34, 35};
+// ================= CONFIG =================
+#define LOCKERS 3
 
-// Coin acceptor
+// LOCKS
+int lockPins[LOCKERS] = {22, 23, 24};
+
+// REED SWITCHES
+int reedPins[LOCKERS] = {30, 31, 32};
+
+// SANITIZATION (UV / MIST / FAN)
+int uvPins[LOCKERS]   = {40, 41, 42};
+int mistPins[LOCKERS] = {43, 44, 45};
+int fanPins[LOCKERS]  = {46, 47, 48};
+
+// COIN
 #define COIN_PIN 2
+volatile int coinPulse = 0;
 
-// =========================================================
-// STATE VARIABLES
-// =========================================================
-volatile int coinPulseCount = 0;
-
-// =========================================================
-// INTERRUPT (COIN ACCEPTOR)
-// =========================================================
-void coinISR() {
-  coinPulseCount++;
-}
-
-// =========================================================
-// SETUP
-// =========================================================
+// ================= SETUP =================
 void setup() {
-  Serial.begin(BAUD_RATE);
+  Serial.begin(115200);
+  Wire.begin();
 
-  for (int i = 0; i < MAX_LOCKERS; i++) {
-    pinMode(LOCK_PINS[i], OUTPUT);
-    pinMode(REED_PINS[i], INPUT_PULLUP);
+  nfc.begin();
+  nfc.SAMConfig();
 
-    digitalWrite(LOCK_PINS[i], HIGH); // LOCKED by default
+  for (int i = 0; i < LOCKERS; i++) {
+    pinMode(lockPins[i], OUTPUT);
+    pinMode(reedPins[i], INPUT_PULLUP);
+
+    pinMode(uvPins[i], OUTPUT);
+    pinMode(mistPins[i], OUTPUT);
+    pinMode(fanPins[i], OUTPUT);
+
+    digitalWrite(lockPins[i], HIGH);
+    digitalWrite(uvPins[i], LOW);
+    digitalWrite(mistPins[i], LOW);
+    digitalWrite(fanPins[i], LOW);
   }
 
   pinMode(COIN_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(COIN_PIN), coinISR, FALLING);
 
-  Serial.println("[SYSTEM] READY");
+  Serial.println("[READY]");
 }
 
-// =========================================================
-// UTILITIES
-// =========================================================
-void lockDoor(int n) {
-  digitalWrite(LOCK_PINS[n], HIGH);
-}
-
-void unlockDoor(int n) {
-  digitalWrite(LOCK_PINS[n], LOW);
-}
-
-bool isDoorOpen(int n) {
-  return digitalRead(REED_PINS[n]) == LOW;
-}
-
-// =========================================================
-// SERIAL COMMAND HANDLER
-// =========================================================
-String input = "";
+// ================= LOOP =================
+String cmd = "";
 
 void loop() {
   while (Serial.available()) {
     char c = Serial.read();
+
     if (c == '\n') {
-      handleCommand(input);
-      input = "";
+      handle(cmd);
+      cmd = "";
     } else {
-      input += c;
+      cmd += c;
     }
   }
 }
 
-// =========================================================
-// COMMAND PARSER
-// =========================================================
-void handleCommand(String cmd) {
-  cmd.trim();
+// ================= HANDLER =================
+void handle(String c) {
+  c.trim();
 
-  // ---------------- STORE HELMET ----------------
-  if (cmd.startsWith("locker:")) {
-    int n = cmd.substring(7).toInt();
-    storeHelmet(n);
+  // NFC READ
+  if (c == "nfcread") {
+    readNFC();
   }
 
-  // ---------------- CLAIM ----------------
-  else if (cmd.startsWith("claim:")) {
-    int n = cmd.substring(6).toInt();
-    claimHelmet(n);
+  // STORE
+  else if (c.startsWith("store:")) {
+    int locker = getVal(c, ':', 1);
+    unlock(locker);
+    delay(2000);
+    lock(locker);
+
+    Serial.println("STORE-DONE-" + String(locker));
+    sanitise(locker);
   }
 
-  // ---------------- SANITISE ----------------
-  else if (cmd.startsWith("sanitise:")) {
-    int n = cmd.substring(10).toInt();
-    sanitise(n);
+  // CLAIM
+  else if (c.startsWith("claim:")) {
+    int locker = getVal(c, ':', 1);
+    unlock(locker);
+    delay(2000);
+    lock(locker);
+
+    Serial.println("CLAIM-DONE-" + String(locker));
   }
 
-  // ---------------- DOOR LOCK ----------------
-  else if (cmd.startsWith("doorlock:")) {
-    int n = cmd.substring(9).toInt();
-    lockDoor(n);
-    Serial.println("DOORLOCK-" + String(n));
+  // SANITISE
+  else if (c.startsWith("sanitise:")) {
+    int locker = getVal(c, ':', 1);
+    sanitise(locker);
   }
 
-  // ---------------- DOOR UNLOCK ----------------
-  else if (cmd.startsWith("doorunlock:")) {
-    int n = cmd.substring(11).toInt();
-    unlockDoor(n);
-    Serial.println("DOORUNLOCK-" + String(n));
+  // DOOR
+  else if (c.startsWith("doorlock:")) {
+    int locker = getVal(c, ':', 1);
+    lock(locker);
+    Serial.println("DOORLOCK-" + String(locker));
   }
 
-  // ---------------- DOOR STATUS ----------------
-  else if (cmd.startsWith("doorstatus:")) {
-    int n = cmd.substring(11).toInt();
-    if (isDoorOpen(n)) {
-      Serial.println("DOORSTATUS-" + String(n) + "-OPEN");
-    } else {
-      Serial.println("DOORSTATUS-" + String(n) + "-CLOSED");
+  else if (c.startsWith("doorunlock:")) {
+    int locker = getVal(c, ':', 1);
+    unlock(locker);
+    Serial.println("DOORUNLOCK-" + String(locker));
+  }
+
+  // COIN PAYMENT
+  else if (c.startsWith("coinpayment:")) {
+    int cost = getVal(c, ':', 1);
+    coinPayment(cost);
+  }
+}
+
+// ================= NFC =================
+void readNFC() {
+  uint8_t uid[7];
+  uint8_t uidLength;
+
+  if (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength)) {
+
+    Serial.print("NFCREAD-");
+
+    for (uint8_t i = 0; i < uidLength; i++) {
+      Serial.print(uid[i], HEX);
     }
-  }
 
-  // ---------------- NFC READ (SIMULATED) ----------------
-  else if (cmd == "nfcread") {
-    delay(2000); // simulate tap delay
-    Serial.println("NFCREAD-123ABC456");
-  }
-
-  // ---------------- COIN PAYMENT ----------------
-  else if (cmd.startsWith("coinpayment:")) {
-    int cost = cmd.substring(12).toInt();
-    handleCoinPayment(cost);
+    Serial.println();
+  } else {
+    Serial.println("NFCREAD-FAIL");
   }
 }
 
-// =========================================================
-// STORE FLOW
-// =========================================================
-void storeHelmet(int n) {
-  unlockDoor(n);
+// ================= SANITISE =================
+void sanitise(int locker) {
 
-  unsigned long start = millis();
+  // UV
+  digitalWrite(uvPins[locker], HIGH);
+  delay(3000);
+  digitalWrite(uvPins[locker], LOW);
 
-  // Wait for door to open and close
-  while (millis() - start < 30000) {
-    if (isDoorOpen(n)) {
-      // wait until closed again
-      while (isDoorOpen(n));
-      lockDoor(n);
-      sanitise(n);
+  // MIST
+  digitalWrite(mistPins[locker], HIGH);
+  delay(2000);
+  digitalWrite(mistPins[locker], LOW);
 
-      Serial.println("STOREHELMET-DONE-" + String(n));
-      return;
-    }
-  }
+  // FAN
+  digitalWrite(fanPins[locker], HIGH);
+  delay(3000);
+  digitalWrite(fanPins[locker], LOW);
+
+  Serial.println("SANITISE-DONE-" + String(locker));
 }
 
-// =========================================================
-// CLAIM FLOW
-// =========================================================
-void claimHelmet(int n) {
-  unlockDoor(n);
-
-  unsigned long start = millis();
-
-  while (millis() - start < 20000) {
-    if (isDoorOpen(n)) {
-      while (isDoorOpen(n));
-      lockDoor(n);
-
-      Serial.println("CLAIM-DONE-" + String(n));
-      return;
-    }
-  }
+// ================= COIN =================
+void coinISR() {
+  coinPulse++;
 }
 
-// =========================================================
-// SANITISE (SIMULATED)
-// =========================================================
-void sanitise(int n) {
-  delay(3000); // simulate UV / spray
-  Serial.println("SANITISE-DONE-" + String(n));
-}
-
-// =========================================================
-// COIN PAYMENT HANDLER
-// =========================================================
-void handleCoinPayment(int cost) {
-  coinPulseCount = 0;
+void coinPayment(int cost) {
+  coinPulse = 0;
   int total = 0;
 
   unsigned long start = millis();
 
   while (millis() - start < 120000) {
-    if (coinPulseCount > 0) {
-      total += coinPulseCount; // 1 pulse = ₱1 (adjust if needed)
-      coinPulseCount = 0;
+
+    if (coinPulse > 0) {
+      total += coinPulse;
+      coinPulse = 0;
 
       Serial.println("TOTAL-" + String(total));
     }
@@ -208,4 +188,34 @@ void handleCoinPayment(int cost) {
       return;
     }
   }
+}
+
+// ================= LOCK =================
+void lock(int i) {
+  digitalWrite(lockPins[i], HIGH);
+}
+
+void unlock(int i) {
+  digitalWrite(lockPins[i], LOW);
+}
+
+// ================= PARSER =================
+int getVal(String data, char sep, int index) {
+  int found = 0;
+  int start = 0;
+  int end = -1;
+
+  for (int i = 0; i <= data.length(); i++) {
+    if (i == data.length() || data.charAt(i) == sep) {
+      found++;
+      if (found == index + 1) {
+        start = end + 1;
+        end = i;
+        break;
+      }
+      end = i;
+    }
+  }
+
+  return data.substring(start, end).toInt();
 }
