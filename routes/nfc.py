@@ -13,24 +13,18 @@ nfc_bp = Blueprint("nfc", __name__)
 @nfc_bp.route("/api/nfc-scan-payment", methods=["POST"])
 def api_nfc_scan_payment():
     """
-    Called by NFC reader hardware when user taps card for PAYMENT.
-    Hardware sends: { "card_uid": "A1B2C3D4", "locker_number": 3 }
-
-    The card UID (hex ID) is stored in the transaction.
-    No PIN is stored on the card — the UID itself is the key.
+    Triggered by the kiosk UI when user selects NFC payment.
+    Only needs locker_number — card UID is read by the controller.
     """
     data          = request.json or {}
-    card_uid      = data.get("card_uid", "").strip().upper()
     locker_number = int(data.get("locker_number", 0))
 
-    if not card_uid:
-        return jsonify({"ok": False, "error": "No card UID provided."}), 400
     if locker_number < 1 or locker_number > NUM_LOCKERS:
         return jsonify({"ok": False, "error": "Invalid locker number."}), 400
     if not is_locker_available(locker_number):
         return jsonify({"ok": False, "error": "Locker already occupied."}), 400
 
-    result = nfc_process_payment(card_uid, locker_number)
+    result = nfc_process_payment(locker_number)
     return jsonify(result), (200 if result.get("ok") else 400)
 
 
@@ -39,19 +33,10 @@ def api_nfc_scan_payment():
 @nfc_bp.route("/api/nfc-scan-retrieve", methods=["POST"])
 def api_nfc_scan_retrieve():
     """
-    Called by NFC reader hardware when user taps card for RETRIEVAL.
-    Hardware sends: { "card_uid": "A1B2C3D4" }
-
-    Flask looks up active transaction by card UID and unlocks directly.
-    No PIN needed — the UID is the key.
+    Triggered by the kiosk UI when user wants to retrieve helmet.
+    No body needed — card UID is read by the controller.
     """
-    data     = request.json or {}
-    card_uid = data.get("card_uid", "").strip().upper()
-
-    if not card_uid:
-        return jsonify({"ok": False, "error": "No card UID provided."}), 400
-
-    result = nfc_process_retrieval(card_uid)
+    result = nfc_process_retrieval()
     return jsonify(result), (200 if result.get("ok") else 400)
 
 
@@ -95,14 +80,8 @@ def api_cash_start():
     if not is_locker_available(locker_number):
         return jsonify({"ok": False, "error": "Locker already occupied."}), 400
 
-    session_id = cash_create_session(locker_number)
-    return jsonify({
-        "ok":         True,
-        "session_id": session_id,
-        "required":   5000,
-        "inserted":   0,
-        "remaining":  5000,
-    })
+    result = cash_create_session(locker_number)
+    return jsonify(result), (200 if result.get("ok") else 400)
 
 
 @nfc_bp.route("/api/cash-insert-coin", methods=["POST"])

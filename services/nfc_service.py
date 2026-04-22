@@ -4,7 +4,7 @@ from services.locker_service import generate_pin, create_rental, now_utc, RENTAL
 from supabase import create_client, Client
 
 try:
-    from controller.controller import store as ctrl_store, claim as ctrl_claim
+    from controller.controller import store as ctrl_store, claim as ctrl_claim, nfc_read as ctrl_nfc_read
     _HW = True
 except Exception as e:
     print(f"[NFC Service] Controller unavailable ({e}); physical locker commands disabled.")
@@ -95,9 +95,10 @@ def nfc_get_active_transaction(card_uid: str) -> dict | None:
 
 # ── NFC Payment Logic ─────────────────────────────────
 
-def nfc_process_payment(card_uid: str, locker_number: int) -> dict:
+def nfc_process_payment(locker_number: int) -> dict:
     """
     Process Stored Value Card payment for a locker rental.
+    - Asks controller to scan NFC card and get UID
     - Checks card exists and has sufficient balance
     - Deducts ₱50 from balance in Supabase
     - Creates transaction linked to card_uid
@@ -105,6 +106,11 @@ def nfc_process_payment(card_uid: str, locker_number: int) -> dict:
 
     Returns dict with ok, locker, rented_at, expires_at or error.
     """
+    # Ask hardware to scan the card
+    card_uid = ctrl_nfc_read() if _HW else ""
+    if not card_uid:
+        return {"ok": False, "error": "No card detected. Please tap your card."}
+
     card = nfc_get_card(card_uid)
 
     if not card:
@@ -194,9 +200,10 @@ def create_rental_with_card(locker_number: int, card_uid: str, pin: str):
 
 # ── NFC Retrieval Logic ───────────────────────────────
 
-def nfc_process_retrieval(card_uid: str) -> dict:
+def nfc_process_retrieval() -> dict:
     """
     Process Stored Value Card tap for helmet retrieval.
+    - Asks controller to scan NFC card and get UID
     - Finds active transaction by card UID
     - Checks for overtime
     - Unlocks locker and marks transaction retrieved
@@ -206,6 +213,11 @@ def nfc_process_retrieval(card_uid: str) -> dict:
     """
     from services.locker_service import calc_overtime, now_utc
     from services.db import db_set_locker, db_update_transaction
+
+    # Ask hardware to scan the card
+    card_uid = ctrl_nfc_read() if _HW else ""
+    if not card_uid:
+        return {"ok": False, "error": "No card detected. Please tap your card."}
 
     transaction = nfc_get_active_transaction(card_uid)
 
