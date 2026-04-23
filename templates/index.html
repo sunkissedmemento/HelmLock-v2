@@ -316,34 +316,6 @@ html,body{width:100vw;height:100vh;overflow:hidden;background:var(--bg);color:va
         </div>
       </div>
 
-      <!-- SCREEN: Payment Method (rental) -->
-      <div class="screen" id="screen-payment">
-        <div class="screen-title">Choose Payment</div>
-        <div class="screen-sub" id="pay-sub">Locker #— · ₱50.00 / hour</div>
-        <div class="pay-options">
-          <div class="pay-card" onclick="selectPayment('cash')">
-            <div class="pay-icon">🪙</div>
-            <div class="pay-name">Coins</div>
-            <div class="pay-desc">Insert ₱1, ₱5, ₱10, or ₱20 coins<br/>Exact ₱50.00 required</div>
-          </div>
-          <div class="pay-card" onclick="selectPayment('stripe')">
-            <div class="pay-icon">📲</div>
-            <div class="pay-name">QR Payment</div>
-            <div class="pay-desc">Scan with GCash, Maya,<br/>Card, or any e-wallet</div>
-          </div>
-          <div class="pay-card" onclick="selectPayment('nfc')">
-            <div class="pay-icon">📡</div>
-            <div class="pay-name">Stored Value Card</div>
-            <div class="pay-desc">Tap your HelmLock card<br/>on the reader</div>
-          </div>
-        </div>
-        <div class="action-bar">
-          <div class="selected-info">
-            📱 <span id="payment-phone-display" style="font-family:'DM Mono',monospace;color:var(--blue);font-size:0.88rem;">—</span>
-          </div>
-          <button class="btn btn-ghost" onclick="showScreen('screen-phone')">← Back</button>
-        </div>
-      </div>
 
       <!-- SCREEN: Overtime Payment Method -->
       <div class="screen" id="screen-overtime-payment">
@@ -831,7 +803,7 @@ function handlePhoneKey(k) {
   updatePhoneDisplay();
 }
 
-function confirmPhone() {
+async function confirmPhone() {
   // Validate PH mobile: starts with 09, exactly 11 digits
   const valid = /^09\d{9}$/.test(phoneInput);
   if (!valid) {
@@ -843,16 +815,13 @@ function confirmPhone() {
     return;
   }
   customerPhone = phoneInput;
-  document.getElementById('pay-sub').textContent = `Locker #${selectedLocker} · ₱50.00 / hour`;
-  document.getElementById('payment-phone-display').textContent = formatPhoneDisplay(customerPhone);
-  showScreen('screen-payment');
+  await startStripePayment();
 }
 
 // ── Rental Payment ────────────────────────────────
-function goToPayment() {
-  if (!selectedLocker) return;
-  document.getElementById('pay-sub').textContent = `Locker #${selectedLocker} · ₱50.00 / hour`;
-  showScreen('screen-payment');
+function goToOvertimePayment() {
+  // ✅ DIRECT TO QR for overtime
+  startOvertimeQR();
 }
 
 async function selectPayment(method) {
@@ -867,7 +836,7 @@ async function startStripePayment() {
   try {
     const res  = await fetch('/api/create-stripe-session', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({locker_number: selectedLocker}),
+      body: JSON.stringify({locker_number: selectedLocker, phone: customerPhone}),
     });
     const data = await res.json();
     hideSpinner();
@@ -922,7 +891,7 @@ function showQRScreen(url, title, sub, amountDisplay, locker) {
 function cancelQR() {
   if (qrPollingTimer) { clearInterval(qrPollingTimer); qrPollingTimer = null; }
   stripeCheckoutUrl = '';
-  showScreen(currentQrMode === 'overtime' ? 'screen-overtime-payment' : 'screen-payment');
+  showScreen(currentQrMode === 'overtime' ? 'screen-overtime-payment' : 'screen-phone');
 }
 
 function startQrPolling(sessionId, mode) {
@@ -1019,7 +988,7 @@ function cancelCash() {
   if (cashPollingTimer) { clearInterval(cashPollingTimer); cashPollingTimer = null; }
   cashSessionId = null;
   document.getElementById('cash-overpay-box').style.display = 'none';
-  showScreen(cashMode === 'overtime' ? 'screen-overtime-payment' : 'screen-payment');
+  showScreen(cashMode === 'overtime' ? 'screen-overtime-payment' : 'screen-phone');
 }
 
 // ── Stored Value Card Payment ─────────────────────
@@ -1042,7 +1011,7 @@ function startOvertimeNfc() {
 }
 
 function cancelNfcPay() {
-  showScreen('screen-payment');
+  showScreen('screen-phone');
 }
 
 function handleNfcPaymentResult(data) {
