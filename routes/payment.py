@@ -3,7 +3,7 @@ import stripe
 from flask import Blueprint, jsonify, render_template, request
 from services.locker_service import (
     is_locker_available, create_rental, check_pin,
-    unlock_locker, mark_overtime_paid, generate_pin,
+    claim_locker, mark_overtime_paid, generate_pin,
     calc_overtime, now_utc, NUM_LOCKERS, RENTAL_PRICE
 )
 from services.stripe_service import (
@@ -181,7 +181,6 @@ def api_session_status():
             pin           = metadata.get("pin", "")
             locker_number = int(metadata.get("locker_number", 0))
 
-            # ── Correct way to access Stripe object fields ──
             customer_details = session.customer_details
             phone_number     = customer_details.phone if customer_details else ""
 
@@ -205,7 +204,7 @@ def api_session_status():
                     new_pin   = generate_pin()
                     rented_at, expires_at = create_rental(locker_number, "stripe", RENTAL_PRICE, new_pin)
 
-                    # ── Save to store FIRST before anything that can crash ──
+                    # Save to store FIRST before anything that can crash
                     _session_store[session_id] = {
                         "status":     "paid",
                         "type":       "rental",
@@ -216,7 +215,7 @@ def api_session_status():
                     }
                     print(f"[Polling] Rental confirmed — Locker #{locker_number} | PIN={new_pin}")
 
-                    # ── SMS after store is saved — crash here won't cause duplicate ──
+                    # SMS after store is saved — crash here won't cause duplicate
                     if phone_number:
                         try:
                             send_pin_sms(phone_number, new_pin, locker_number, expires_at.strftime("%I:%M %p"))
@@ -231,14 +230,13 @@ def api_session_status():
 
     except Exception as e:
         print(f"[Polling] Stripe error: {e}")
-        # Return stored result if we have one, even if Stripe call failed
         stored = _session_store.get(session_id, {})
         if stored.get("status") == "paid":
             return jsonify(stored)
         return jsonify({"status": "pending"})
 
 
-# ── PIN & Unlock ─────────────────────────────────────
+# ── PIN & Claim ──────────────────────────────────────
 
 @payment_bp.route("/api/check-pin", methods=["POST"])
 def api_check_pin():
@@ -254,24 +252,7 @@ def api_unlock():
     pin = (request.json or {}).get("pin", "").strip()
     if not pin.isdigit() or len(pin) != 6:
         return jsonify({"ok": False, "message": "Invalid PIN format."})
-    result = unlock_locker(pin)
-
-    # ── SERIAL COMM STUB ────────────────────────────────
-    # When locker is successfully unlocked, trigger the solenoid via serial port.
-    # Hardware team: replace this stub with actual serial communication.
-    #
-    # Example using pyserial:
-    #   import serial
-    #   ser = serial.Serial('/dev/ttyUSB0', 9600, timeout=1)
-    #   locker_num = result.get("locker")
-    #   ser.write(f"UNLOCK:{locker_num}\n".encode())
-    #   ser.close()
-    #
-    if result.get("ok"):
-        locker_num = result.get("locker")
-        print(f"[SERIAL STUB] Send unlock signal for Locker #{locker_num} via serial port")
-        # TODO: serial.Serial('/dev/ttyUSB0', 9600).write(f"UNLOCK:{locker_num}\n".encode())
-
+    result = claim_locker(pin)
     return jsonify(result)
 
 
@@ -332,25 +313,13 @@ def overtime_success():
     return render_template("overtime_paid.html", locker=locker_number, pin=pin)
 
 
-# ── Serial Communication Stubs ───────────────────────
-# These endpoints are called by the microcontroller (Raspberry Pi / Arduino)
-# via serial communication (pyserial). The hardware team should:
-# 1. Read these endpoint specs
-# 2. Write a script on the Pi that reads serial data and calls these endpoints
-# 3. Replace the print stubs in /api/unlock with actual serial.write() calls
-#
-# Serial communication flow:
-#   Kiosk → Flask → serial.write("UNLOCK:3\n") → Arduino reads → triggers relay
-#   Arduino reads coin → serial.write("COIN:1000\n") → Pi reads → POST /api/cash-insert-coin
-#   Arduino reads NFC → serial.write("NFC:A1B2C3D4\n") → Pi reads → POST /api/nfc-scan-payment
+# ── Hardware Endpoints ───────────────────────────────
 
 @payment_bp.route("/api/hardware/locker-status", methods=["GET"])
 def api_hardware_locker_status():
     """
-    Hardware team endpoint — returns which lockers are occupied.
+    Returns which lockers are occupied.
     Microcontroller can poll this to sync LED indicators.
-
-    Serial flow: Pi polls this → updates LED array via GPIO
     """
     from services.db import db_get_all_lockers
     lockers = db_get_all_lockers()
@@ -362,56 +331,11 @@ def api_hardware_locker_status():
     })
 
 
-@payment_bp.route("/api/hardware/trigger-unlock", methods=["POST"])
-def api_hardware_trigger_unlock():
-    """
-    Hardware team endpoint — directly trigger a locker solenoid.
-    Called by Pi after Flask confirms a valid unlock.
-
-    Request: { "locker_number": 3 }
-
-    Serial flow:
-      Flask calls this → Pi receives via HTTP → Pi writes to Arduino serial
-      Pi script example:
-        import serial, requests
-        ser = serial.Serial('/dev/ttyUSB0', 9600)
-        def unlock(locker_num):
-            ser.write(f"UNLOCK:{locker_num}\\n".encode())
-    """
-    data          = request.json or {}
-    locker_number = int(data.get("locker_number", 0))
-
-    if locker_number < 1 or locker_number > NUM_LOCKERS:
-        return jsonify({"ok": False, "error": "Invalid locker number."}), 400
-
-    # ── SERIAL COMM STUB ────────────────────────────────
-    # Hardware team: replace with actual serial write
-    # import serial
-    # ser = serial.Serial('/dev/ttyUSB0', 9600, timeout=1)
-    # ser.write(f"UNLOCK:{locker_number}\n".encode())
-    # response = ser.readline().decode().strip()  # wait for "OK" from Arduino
-    # ser.close()
-    print(f"[SERIAL STUB] Trigger solenoid for Locker #{locker_number}")
-
-    return jsonify({"ok": True, "locker": locker_number, "message": "Unlock signal sent."})
-
-
 @payment_bp.route("/api/hardware/coin-inserted", methods=["POST"])
 def api_hardware_coin_inserted():
     """
-    Hardware team endpoint — called by Pi when coin acceptor detects a coin.
-    Pi reads coin signal via GPIO/serial then calls this endpoint.
-
+    Called by Pi when coin acceptor detects a coin.
     Request: { "session_id": "...", "amount": 1000 }
-
-    Serial flow:
-      Arduino detects coin → serial.write("COIN:1000\\n") → Pi reads
-      Pi script:
-        line = ser.readline().decode().strip()
-        if line.startswith("COIN:"):
-            amount = int(line.split(":")[1])
-            requests.post("http://localhost:5000/api/hardware/coin-inserted",
-                         json={"session_id": session_id, "amount": amount})
     """
     from services.nfc_service import cash_insert_coin
     data       = request.json or {}
@@ -428,18 +352,8 @@ def api_hardware_coin_inserted():
 @payment_bp.route("/api/hardware/nfc-tapped", methods=["POST"])
 def api_hardware_nfc_tapped():
     """
-    Hardware team endpoint — called by Pi when NFC reader detects a card tap.
-    Pi reads card UID via NFC library (nfcpy or mfrc522) then calls this.
-
+    Called by Pi when NFC reader detects a card tap.
     Request: { "card_uid": "A1B2C3D4", "mode": "payment"|"retrieve", "locker_number": 3 }
-
-    Serial/GPIO flow:
-      NFC reader (PN532 via SPI/I2C) → Pi reads UID via nfcpy
-      Pi script:
-        import nfc  # or use mfrc522 library
-        uid = read_nfc_uid()  # returns hex string e.g. "A1B2C3D4"
-        requests.post("http://localhost:5000/api/hardware/nfc-tapped",
-                     json={"card_uid": uid, "mode": "payment", "locker_number": 3})
     """
     from services.nfc_service import nfc_process_payment, nfc_process_retrieval
     from services.locker_service import is_locker_available
@@ -460,11 +374,5 @@ def api_hardware_nfc_tapped():
         result = nfc_process_payment(card_uid, locker_number)
     else:
         result = nfc_process_retrieval(card_uid)
-
-    # If retrieval succeeded, trigger solenoid
-    if result.get("ok") and mode == "retrieve":
-        locker_num = result.get("locker")
-        print(f"[SERIAL STUB] NFC retrieval — trigger solenoid for Locker #{locker_num}")
-        # TODO: serial.Serial('/dev/ttyUSB0', 9600).write(f"UNLOCK:{locker_num}\n".encode())
 
     return jsonify(result)

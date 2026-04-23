@@ -8,7 +8,7 @@ from services.db import (
     db_get_transaction_by_pin
 )
 try:
-    from controller.controller import store as ctrl_store, claim as ctrl_claim
+    from controller.controller import store as ctrl_store, claim as ctrl_claim, sanitise as ctrl_sanitise
     _HW = True
 except Exception as e:
     print(f"[Service] Controller unavailable ({e}); physical locker commands disabled.")
@@ -160,7 +160,11 @@ def create_rental(locker_number: int, payment_method: str, amount: int, pin: str
             try:
                 ctrl_store(locker_number)
             except Exception as hw_err:
-                print(f"[HW] Serial error (non-fatal): {hw_err}")
+                print(f"[HW] Store error (non-fatal): {hw_err}")
+            try:
+                ctrl_sanitise(locker_number)
+            except Exception as hw_err:
+                print(f"[HW] Sanitise error (non-fatal): {hw_err}")
     else:
         print(f"[Service] ERROR: transaction insert failed for Locker #{locker_number}")
 
@@ -209,13 +213,13 @@ def check_pin(pin: str) -> dict:
 }
 
 
-def unlock_locker(pin: str) -> dict:
+def claim_locker(pin: str) -> dict:
     """
-    Unlocks a locker if PIN is valid and overtime (if any) is paid.
-    Frees the locker in DB.
+    Claims a locker if PIN is valid and overtime (if any) is paid.
+    Frees the locker in DB and opens it for item retrieval.
     """
     row = db_get_transaction_by_pin(pin)
-    print(f"[DEBUG] unlock row: {row}")
+    print(f"[DEBUG] claim row: {row}")
 
     if not row:
         # Dev fallback
@@ -243,13 +247,17 @@ def unlock_locker(pin: str) -> dict:
     if pin in _dev_store:
         _dev_store[pin]["status"] = "retrieved"
 
-    print(f"[Service] Locker #{row['locker_number']} unlocked via PIN={pin}")
+    locker_number = row["locker_number"]
+    print(f"[Service] Locker #{locker_number} claimed via PIN={pin}")
+
     if _HW:
         try:
-            ctrl_claim(row["locker_number"])
+            ctrl_claim(locker_number)
         except Exception as hw_err:
-            print(f"[HW] Serial error (non-fatal): {hw_err}")
-    return {"ok": True, "locker": row["locker_number"]}
+            print(f"[HW] Claim error (non-fatal): {hw_err}")
+
+    return {"ok": True, "locker": locker_number}
+
 
 
 def mark_overtime_paid(pin: str, amount: int) -> dict:
